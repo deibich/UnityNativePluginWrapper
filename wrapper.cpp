@@ -11,18 +11,19 @@
 #include "IUnityInterface.h"
 #include "IUnityLog.h"
 
-#if _WINDOWS
 #include <wtypes.h>
-#endif
-
-typedef void (UNITY_INTERFACE_API* UnityPluginLoadFct)(void* unityInferfaces);
-typedef void (UNITY_INTERFACE_API* UnityPluginUnLoadFct)();
 
 IUnityInterfaces* s_unityInterfaces{ nullptr };
 IUnityLog* s_unityLogger{ nullptr };
-std::vector<DLL_DIRECTORY_COOKIE> s_dllLibs{};
 
-typedef void(*StringArrayDelegateFct)(const char* pStringValues[], int nValues);
+typedef void (UNITY_INTERFACE_API* UnityPluginLoadFunc)(void* unityInferfaces);
+typedef void (UNITY_INTERFACE_API* UnityPluginUnloadFunc)();
+typedef void(*StringArrayDelegateFunc)(const char* stringArray[], int valueCount);
+
+std::vector<DLL_DIRECTORY_COOKIE> s_dllDirs{};
+
+constexpr auto unityPluginLoadFuncName = "UnityPluginLoad";
+constexpr auto unityPluginUnloadFuncName = "UnityPluginUnload";
 
 class Library
 {
@@ -34,50 +35,40 @@ public:
 
 	auto isLoaded() const -> bool;
 	auto isPlugin() const -> bool;
-	auto getName() const->std::string_view;
-
+	auto getName() const -> std::string_view;
 
 private:
-	UnityPluginLoadFct unityPluginLoad_{ nullptr };
-	UnityPluginUnLoadFct unityPluginUnload_{ nullptr };
+	UnityPluginLoadFunc unityPluginLoad_{ nullptr };
+	UnityPluginUnloadFunc unityPluginUnload_{ nullptr };
 	std::string libraryNamePath_{};
 
-#if _WINDOWS
-	HMODULE hGetProcIDDLL{ NULL };
-#else
-	void* hGetProcIDDLL{ nullptr };
-#endif
-
+	HMODULE libraryHandle_{ NULL };
 };
 
 auto Library::load(IUnityInterfaces* unityInterfaces) -> bool
 {
 	if (!isLoaded())
 	{
-#if _WINDOWS
-		hGetProcIDDLL = LoadLibraryA(libraryNamePath_.c_str());
-		if (hGetProcIDDLL == NULL)
+		libraryHandle_ = LoadLibraryA(libraryNamePath_.c_str());
+		if (libraryHandle_ == NULL)
 		{
-			hGetProcIDDLL = LoadLibraryExA(libraryNamePath_.c_str(), NULL, LOAD_LIBRARY_SEARCH_USER_DIRS);
-
+			libraryHandle_ = LoadLibraryExA(libraryNamePath_.c_str(), NULL, LOAD_LIBRARY_SEARCH_USER_DIRS);
 		}
-#else
-		hGetProcIDDLL = dlopen(libraryNamePath_.c_str(), RTLD_LAZY);
-#endif
 	}
+
 	if (isLoaded())
 	{
-		auto fctPointer = GetProcAddress(hGetProcIDDLL, "UnityPluginLoad");
-		if (fctPointer != NULL)
+		auto funcPointer = GetProcAddress(libraryHandle_, unityPluginLoadFuncName);
+		if (funcPointer != NULL)
 		{
-			unityPluginLoad_ = (UnityPluginLoadFct)fctPointer;
+			unityPluginLoad_ = (UnityPluginLoadFunc)funcPointer;
 		}
 
-		fctPointer = NULL;
-		fctPointer = GetProcAddress(hGetProcIDDLL, "UnityPluginUnload");
-		if (fctPointer != NULL)
+		funcPointer = NULL;
+		funcPointer = GetProcAddress(libraryHandle_, unityPluginUnloadFuncName);
+		if (funcPointer != NULL)
 		{
-			unityPluginUnload_ = (UnityPluginUnLoadFct)fctPointer;
+			unityPluginUnload_ = (UnityPluginUnloadFunc)funcPointer;
 		}
 
 		if (isPlugin())
@@ -101,33 +92,20 @@ auto Library::unload() -> void
 		{
 			unityPluginUnload_();
 		}
-#if _WINDOWS
 
-		FreeLibrary(hGetProcIDDLL);
-		hGetProcIDDLL = NULL;
-#else
-		dlclose(hGetProcIDDLL)
-			hGetProcIDDLL = nullptr;
-#endif
+		FreeLibrary(libraryHandle_);
+		libraryHandle_ = NULL;
 	}
 }
 
 auto Library::isLoaded() const -> bool
 {
-#if _WINDOWS
-	return hGetProcIDDLL != NULL;
-#else
-	return hGetProcIDDLL != nullptr;
-#endif
+	return libraryHandle_ != NULL;
 }
 
 auto Library::isPlugin() const -> bool
 {
-#if _WINDOWS
 	return unityPluginLoad_ != NULL && unityPluginUnload_ != NULL;
-#else
-	return unityPluginLoad_ != nullptr && unityPluginUnload_ != nullptr;
-#endif
 }
 
 auto Library::getName() const -> std::string_view
@@ -136,7 +114,6 @@ auto Library::getName() const -> std::string_view
 }
 
 class LibraryCollection {
-
 public:
 	LibraryCollection(LibraryCollection& other) = delete;
 	void operator=(const LibraryCollection&) = delete;
@@ -298,7 +275,7 @@ extern "C" {
 
 		auto addedPath = AddDllDirectory(p.c_str());
 		if (addedPath != NULL) {
-			s_dllLibs.push_back(addedPath);
+			s_dllDirs.push_back(addedPath);
 		}
 	}
 
@@ -307,7 +284,7 @@ extern "C" {
 		return LibraryCollection::getInstance().getLoadedLibraryCount();
 	}
 
-	void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetLoadedLibraryNames(StringArrayDelegateFct callback)
+	void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API GetLoadedLibraryNames(StringArrayDelegateFunc callback)
 	{
 		if (callback == nullptr)
 		{
